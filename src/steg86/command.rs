@@ -10,13 +10,13 @@ use crate::steg86::binary::Text;
 /// Display the steganographic profile for the input.
 /// See `steg86 profile -h`.
 pub fn profile(matches: &ArgMatches) -> Result<()> {
-    let path = matches.value_of("input").unwrap();
+    let path = Path::new(matches.value_of_os("input").unwrap());
     let profile = {
         let text = if matches.is_present("raw") {
             let bitness: u32 = matches.value_of_t("bitness").unwrap_or(64);
-            Text::from_raw(Path::new(path), bitness)?
+            Text::from_raw(path, bitness)?
         } else {
-            Text::from_program(Path::new(path))?
+            Text::from_program(path)?
         };
 
         text.profile()?
@@ -27,7 +27,7 @@ pub fn profile(matches: &ArgMatches) -> Result<()> {
         \t{} total instructions\n\
         \t{} potential semantic pairs\n\
         \t{} bits of information capacity ({} bytes, approx. {}KB)",
-        path,
+        path.display(),
         profile.instruction_count,
         profile.semantic_pairs,
         profile.information_capacity,
@@ -41,8 +41,8 @@ pub fn profile(matches: &ArgMatches) -> Result<()> {
 /// Embed a message (provided via `stdin`) into the input.
 /// See `steg86 embed -h`.
 pub fn embed(matches: &ArgMatches) -> Result<()> {
-    let input = Path::new(matches.value_of("input").unwrap());
-    let output = match matches.value_of("output") {
+    let input = Path::new(matches.value_of_os("input").unwrap());
+    let output = match matches.value_of_os("output") {
         Some(output) => PathBuf::from(output),
         None => Path::new(input).with_extension("steg"),
     };
@@ -71,7 +71,7 @@ pub fn embed(matches: &ArgMatches) -> Result<()> {
 /// Extract a message (and stream it to `stdout`) from the input.
 /// See `steg86 extract -h`.
 pub fn extract(matches: &ArgMatches) -> Result<()> {
-    let input = Path::new(matches.value_of("input").unwrap());
+    let input = Path::new(matches.value_of_os("input").unwrap());
 
     let text = if matches.is_present("raw") {
         let bitness: u32 = matches.value_of_t("bitness").unwrap_or(64);
