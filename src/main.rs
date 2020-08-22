@@ -1,11 +1,50 @@
 use anyhow::Result;
 use clap::{App, AppSettings, Arg};
 
-use std::process;
-
 mod steg86;
 
-fn run() -> Result<()> {
+trait AddCommonArguments {
+    fn add_common_arguments(self) -> Self;
+}
+
+impl<'b> AddCommonArguments for App<'b> {
+    fn add_common_arguments(self) -> Self {
+        self.arg(
+            Arg::with_name("raw")
+                .about("treat the input as a raw binary")
+                .long("raw")
+                .short('r'),
+        )
+        .arg(
+            Arg::with_name("bitness")
+                .about("the bitness of the raw binary")
+                .long("bitness")
+                .short('b')
+                .takes_value(true)
+                .possible_values(&["16", "32", "64"])
+                .requires("raw"),
+        )
+        .arg(
+            Arg::with_name("safe-ranges")
+                .about("path to a CSV file containing safe ranges")
+                .long_about(
+                    "A path to a CSV file containing safe ranges. Each row must
+contain two values, the first being an offset into the text
+section and the second being a length, both in bytes.
+Numbers are parsed as hexadecimal if they begin with \"0x\"
+and decimal otherwise. Unsorted and overlapping ranges are
+permitted.",
+                )
+                .long("safe-ranges")
+                .short('s')
+                .takes_value(true),
+        )
+    }
+}
+
+fn main() -> Result<()> {
+    env_logger::init();
+
     let matches = App::new(env!("CARGO_PKG_NAME"))
         .setting(AppSettings::VersionlessSubcommands)
         .setting(AppSettings::SubcommandRequiredElseHelp)
@@ -15,21 +54,7 @@ fn run() -> Result<()> {
             App::new("profile")
                 .about("profile a binary for steganographic storage capacity")
                 // TODO(ww): --json flag.
-                .arg(
-                    Arg::with_name("raw")
-                        .about("treat the input as a raw binary")
-                        .long("raw")
-                        .short('r'),
-                )
-                .arg(
-                    Arg::with_name("bitness")
-                        .about("the bitness of the raw binary")
-                        .long("bitness")
-                        .short('b')
-                        .takes_value(true)
-                        .possible_values(&["16", "32", "64"])
-                        .requires("raw"),
-                )
+                .add_common_arguments()
                 .arg(
                     Arg::with_name("input")
                         .about("the binary to profile")
@@ -40,21 +65,7 @@ fn run() -> Result<()> {
         .subcommand(
             App::new("embed")
                 .about("embed some data into a binary steganographically")
-                .arg(
-                    Arg::with_name("raw")
-                        .about("treat the input as a raw binary")
-                        .long("raw")
-                        .short('r'),
-                )
-                .arg(
-                    Arg::with_name("bitness")
-                        .about("the bitness of the raw binary")
-                        .long("bitness")
-                        .short('b')
-                        .takes_value(true)
-                        .possible_values(&["16", "32", "64"])
-                        .requires("raw"),
-                )
+                .add_common_arguments()
                 .arg(
                     Arg::with_name("input")
                         .about("the binary to embed into")
@@ -71,21 +82,7 @@ fn run() -> Result<()> {
         .subcommand(
             App::new("extract")
                 .about("extract the hidden data from a binary")
-                .arg(
-                    Arg::with_name("raw")
-                        .about("treat the input as a raw binary")
-                        .long("raw")
-                        .short('r'),
-                )
-                .arg(
-                    Arg::with_name("bitness")
-                        .about("the bitness of the raw binary")
-                        .long("bitness")
-                        .short('b')
-                        .takes_value(true)
-                        .possible_values(&["16", "32", "64"])
-                        .requires("raw"),
-                )
+                .add_common_arguments()
                 .arg(
                     Arg::with_name("input")
                         .about("the binary to extract from")
@@ -101,16 +98,4 @@ fn run() -> Result<()> {
         ("extract", Some(matches)) => steg86::command::extract(&matches),
         _ => unreachable!(),
     }
-}
-
-fn main() {
-    env_logger::init();
-
-    process::exit(match run() {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("Fatal: {}", e);
-            1
-        }
-    });
 }

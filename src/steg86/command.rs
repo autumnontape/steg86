@@ -12,12 +12,16 @@ use crate::steg86::binary::Text;
 pub fn profile(matches: &ArgMatches) -> Result<()> {
     let path = Path::new(matches.value_of_os("input").unwrap());
     let profile = {
-        let text = if matches.is_present("raw") {
+        let mut text = if matches.is_present("raw") {
             let bitness: u32 = matches.value_of_t("bitness").unwrap_or(64);
             Text::from_raw(path, bitness)?
         } else {
             Text::from_program(path)?
         };
+
+        if let Some(safe_ranges) = matches.value_of_os("safe-ranges") {
+            text.read_safe_ranges(safe_ranges)?;
+        }
 
         text.profile()?
     };
@@ -47,12 +51,16 @@ pub fn embed(matches: &ArgMatches) -> Result<()> {
         None => Path::new(input).with_extension("steg"),
     };
 
-    let text = if matches.is_present("raw") {
+    let mut text = if matches.is_present("raw") {
         let bitness: u32 = matches.value_of_t("bitness").unwrap_or(64);
         Text::from_raw(Path::new(input), bitness)?
     } else {
         Text::from_program(Path::new(input))?
     };
+
+    if let Some(safe_ranges) = matches.value_of_os("safe-ranges") {
+        text.read_safe_ranges(safe_ranges)?;
+    }
 
     let message = {
         let mut message = Vec::new();
@@ -73,12 +81,16 @@ pub fn embed(matches: &ArgMatches) -> Result<()> {
 pub fn extract(matches: &ArgMatches) -> Result<()> {
     let input = Path::new(matches.value_of_os("input").unwrap());
 
-    let text = if matches.is_present("raw") {
+    let mut text = if matches.is_present("raw") {
         let bitness: u32 = matches.value_of_t("bitness").unwrap_or(64);
         Text::from_raw(Path::new(input), bitness)?
     } else {
         Text::from_program(Path::new(input))?
     };
+
+    if let Some(safe_ranges) = matches.value_of_os("safe-ranges") {
+        text.read_safe_ranges(safe_ranges)?;
+    }
 
     io::stdout().write_all(&text.extract()?)?;
 

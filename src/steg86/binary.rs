@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bit_vec::BitVec;
 use goblin::{elf, mach, pe, Object};
 use iced_x86::{Code, Decoder, DecoderOptions, Encoder, Instruction, OpKind};
@@ -6,7 +6,8 @@ use lazy_static::lazy_static;
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, Read};
+use std::ops::Range;
 use std::path::Path;
 
 /// The magic byte that identifies a steg86-instrumented file.
@@ -164,6 +165,10 @@ pub struct Text {
 
     /// The end offset of this instruction text, within some (unspecified) input file.
     end_offset: usize,
+
+    /// An in-order array of non-overlapping ranges of offsets into the raw instruction
+    /// data that are expected to be safe to use for steganography.
+    safe_ranges: Vec<Range<usize>>,
 
     /// The raw instruction data.
     data: Vec<u8>,
@@ -520,6 +525,7 @@ impl Text {
             bitness: bitness,
             start_offset: 0,
             end_offset: program_buffer.len(),
+            safe_ranges: vec![0..program_buffer.len()],
             data: program_buffer,
         })
     }
@@ -563,6 +569,7 @@ impl Text {
                 bitness: bitness,
                 start_offset: offset,
                 end_offset: offset + size,
+                safe_ranges: vec![0..section_buf.len()],
                 data: section_buf,
             })
         } else {
@@ -593,12 +600,15 @@ impl Text {
                 .iter()
                 .find(|&sect| sect.0.name().map_or(false, |name| name == "__text"))
             {
+                let section_buf: Vec<u8> = text_section.1.into();
+
                 #[allow(clippy::redundant_field_names)]
                 Ok(Text {
                     bitness: bitness,
                     start_offset: text_section.0.offset as usize,
                     end_offset: (text_section.0.offset as usize) + (text_section.0.size as usize),
-                    data: text_section.1.into(),
+                    safe_ranges: vec![0..section_buf.len()],
+                    data: section_buf,
                 })
             } else {
                 Err(anyhow!("couldn't find __text section; maybe stripped?"))
@@ -641,10 +651,107 @@ impl Text {
                 bitness: bitness,
                 start_offset: offset,
                 end_offset: offset + size,
+                safe_ranges: vec![0..section_buf.len()],
                 data: section_buf,
             })
         } else {
             Err(anyhow!("couldn't find .text section"))
+        }
+    }
+
+    pub fn read_safe_ranges<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        use std::fs::File;
+        use std::io::BufReader;
+
+        let path = path.as_ref();
+        let file =
+            File::open(path).with_context(|| format!("failed opening {}", path.display()))?;
+        let buf_reader = BufReader::new(file);
+
+        self.parse_safe_ranges(buf_reader)
+            .with_context(|| format!("failed reading safe ranges from {}", path.display()))
+    }
+
+    fn parse_safe_ranges<R: BufRead>(&mut self, read: R) -> Result<()> {
+        let mut safe_ranges = read
+            // Iterate over lines.
+            .lines()
+            // Take line numbers for error reporting.
+            .enumerate()
+            // Skip empty lines and lines containing only whitespace.
+            .filter(|(_, l)| !matches!(l, Ok(l) if l.trim_start().is_empty()))
+            // Parse rows.
+            .map(|(line_i, l)| {
+                let line_n = line_i + 1;
+                let l = l?;
+
+                let mut numbers = l.split(',').map(|part| {
+                    let part = part.trim();
+
+                    let result = if part.starts_with("0x") || part.starts_with("0X") {
+                        usize::from_str_radix(&part[2..], 16)
+                    } else {
+                        usize::from_str_radix(part, 10)
+                    };
+
+                    result.with_context(|| format!("failed parsing number at line {}", line_n))
+                });
+
+                let from = numbers
+                    .next()
+                    .with_context(|| format!("no columns at line {}", line_n))??;
+                let len = numbers
+                    .next()
+                    .with_context(|| format!("only 1 column at line {}", line_n))??;
+                if numbers.next().is_some() {
+                    return Err(anyhow!("more than 2 columns at line {}", line_n));
+                }
+
+                let to = from
+                    .checked_add(len)
+                    .with_context(|| format!("end of range overflows usize at line {}", line_n))?;
+
+                if to > self.data.len() {
+                    return Err(anyhow!(
+                        "range at line {} goes beyond the end of the program text",
+                        line_n
+                    ));
+                }
+
+                Ok(from..to)
+            })
+            // Remove empty ranges.
+            .filter(|range| !matches!(range, Ok(range) if range.end == range.start))
+            // Collect into a `Vec` or produce an error.
+            .collect::<Result<Vec<_>>>()?;
+
+        // Sort ranges by start offset.
+        safe_ranges.sort_unstable_by_key(|r| r.start);
+
+        // Merge overlapping and adjacent ranges.
+        safe_ranges.dedup_by(|range_b, range_a| {
+            // `dedup_by` passes elements in opposite order,
+            // so we know that range_b.start >= range_a.start.
+
+            if range_b.contains(&range_a.end) {
+                // Range B overlaps or borders the end of Range A.
+                range_a.end = range_b.end;
+                true
+            } else if range_a.contains(&range_b.start) {
+                // Range A fully contains range B.
+                true
+            } else {
+                // The ranges don't overlap.
+                false
+            }
+        });
+
+        if safe_ranges.is_empty() {
+            Err(anyhow!("no non-empty lines found"))
+        } else {
+            self.safe_ranges = safe_ranges;
+
+            Ok(())
         }
     }
 }
@@ -666,6 +773,7 @@ mod tests {
             bitness: 64,
             start_offset: 0,
             end_offset: 0,
+            safe_ranges: vec![0..xors.len()],
             data: xors,
         }
     }
