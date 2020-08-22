@@ -187,14 +187,32 @@ pub struct StegProfile {
     /// than `semantic_pairs`, to accommodate the steg86 header.
     pub information_capacity: usize,
 
+    information_map: InformationMap,
+}
+
+/// Holds either a `Vec` of instruction text offsets for mapless files or a `Vec`
+/// of `MapSegment` for mapped files.
+#[derive(Debug)]
+enum InformationMap {
     /// An array of instruction text offsets, one for each pair in `semantic_pairs`.
+    Mapless(Vec<usize>),
+    /// An array of `MapSegment` with information about how to encode the inband map.
+    Mapped(Vec<MapSegment>),
+}
+
+/// Represents a contiguous chunk of decodable instructions and the offsets of
+/// steganographic opportunities within it.
+#[derive(Debug)]
+struct MapSegment {
+    offset_in_text: usize,
+    skip_following_bytes: usize,
     information_offsets: Vec<usize>,
 }
 
 impl Text {
     /// Generate a steganographic profile for this `Text`, or `Err` if the text is
     /// unsuitable for steg86 (e.g., if it has too few semantic pairs).
-    pub fn profile(&self) -> Result<StegProfile> {
+    pub fn profile_mapless(&self) -> Result<StegProfile> {
         let mut icount = 0;
         let mut offsets = Vec::new();
         let mut decoder = Decoder::new(self.bitness, &self.data, DecoderOptions::NONE);
@@ -244,7 +262,63 @@ impl Text {
             instruction_count: icount,
             semantic_pairs: offsets.len(),
             information_capacity: offsets.len() - STEG86_HEADER_SIZE_BITS,
-            information_offsets: offsets,
+            information_map: InformationMap::Mapless(offsets),
+        })
+    }
+
+    /// Generate a steganographic profile for this `Text`, or `Err` if the text is
+    /// unsuitable for steg86 (e.g., if it has too few semantic pairs).
+    pub fn profile_mapped(&self) -> Result<StegProfile> {
+        let mut icount = 0;
+        let mut offsets = Vec::new();
+        let mut decoder = Decoder::new(self.bitness, &self.data, DecoderOptions::NONE);
+
+        for instruction in &mut decoder {
+            // Iterating over the decoder yields Code::INVALID on errors, so handle them first.
+            if instruction.code() == Code::INVALID {
+                return Err(anyhow!(
+                    "encountered an invalid instruction at text offset {} (file offset {})",
+                    decoder.position(),
+                    self.start_offset + decoder.position(),
+                ));
+            }
+
+            icount += 1;
+
+            // Is our opcode one of the ones the has a semantic dual?
+            // If not, skip it.
+            if !SUPPORTED_OPCODES.contains(&instruction.code()) {
+                continue;
+            }
+
+            // Is our opcode register-to-register?
+            // If not, skip it.
+            if instruction.op0_kind() != OpKind::Register
+                || instruction.op1_kind() != OpKind::Register
+            {
+                continue;
+            }
+
+            // We don't set a different base IP, so ip here always corresponds
+            // to our text offset.
+            offsets.push(instruction.ip() as usize);
+        }
+
+        // Fail if we don't have enough bits of information to store *at least* the steg86
+        // header and a single byte of message data.
+        if offsets.len() < STEG86_MINIMUM_CAPACITY_BITS {
+            return Err(anyhow!(
+                "insufficient steganographic capacity: expected at least {} bits, got {}",
+                STEG86_MINIMUM_CAPACITY_BITS,
+                offsets.len()
+            ));
+        }
+
+        Ok(StegProfile {
+            instruction_count: icount,
+            semantic_pairs: offsets.len(),
+            information_capacity: offsets.len() - STEG86_HEADER_SIZE_BITS,
+            information_map: InformationMap::Mapless(offsets),
         })
     }
 
@@ -383,6 +457,10 @@ impl Text {
     /// Returns the message bytes on success, or `Err` on any failure.
     pub fn extract(&self) -> Result<Vec<u8>> {
         let profile = self.profile()?;
+        let information_offsets = match &profile.information_map {
+            InformationMap::Mapless(information_offsets) => information_offsets,
+            InformationMap::Mapped(_) => unreachable!(),
+        };
         let mut decoder = Decoder::new(self.bitness, &self.data, DecoderOptions::NONE);
 
         // First, exact the steg86 header.
@@ -392,8 +470,7 @@ impl Text {
             let mut header_bits = BitVec::new();
             header_bits.reserve(STEG86_HEADER_SIZE_BITS);
 
-            for &offset in profile
-                .information_offsets
+            for &offset in information_offsets
                 .iter()
                 .take(STEG86_HEADER_SIZE_BITS)
             {
@@ -459,8 +536,7 @@ impl Text {
             let mut message_bits = BitVec::new();
             message_bits.reserve(profile.information_capacity as usize);
 
-            for &offset in profile
-                .information_offsets
+            for &offset in information_offsets
                 .iter()
                 .skip(STEG86_HEADER_SIZE_BITS)
                 .take(message_len * 8)
